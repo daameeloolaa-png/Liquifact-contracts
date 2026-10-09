@@ -556,6 +556,22 @@ stellar contract invoke \
 
 ## 8. Security notes for operators
 
+### Operational pause vs. legal hold
+
+The contract exposes two independent freeze mechanisms:
+- **Operational pause** (`set_paused` / `is_paused` / `set_pause_max_duration`): a
+  single-call admin toggle with optional auto-expiry and rate limiting, designed
+  for rapid incident response (e.g. suspected token bug). See
+  [`escrow-pause.md`](escrow-pause.md).
+- **Compliance legal hold** (`set_legal_hold` / `clear_legal_hold`): a two-step
+  timelocked freeze designed for compliance scenarios. See
+  [`escrow-legal-hold.md`](escrow-legal-hold.md).
+
+When both are active, the pause gate fires first (precedence). Clearing the
+pause exposes the legal hold gate if it is still set. Operators should reach
+for the pause first during active incidents and the legal hold only when a
+compliance freeze with a cooling-off window is required.
+
 ### Token economics (out of scope)
 
 `escrow/src/external_calls.rs` explicitly documents that **fee-on-transfer,
@@ -580,6 +596,12 @@ in-place upgrade procedure.
   1. **`propose_admin(new_admin, validity_window_secs)`**: Requires authorization from the current admin. It validates that `new_admin` is not the current admin (reverts with `NewAdminSameAsCurrent` / code 80 if they are identical). On success, it writes the successor to `DataKey::PendingAdmin` and the expiry timestamp to `DataKey::PendingAdminExpiry` and emits `AdminProposedEvent` (`adm_prop`).
   2. **`accept_admin()`**: Requires authorization from the proposed successor address. It verifies that a proposal exists (reverts with `NoPendingAdmin` / code 172 if `DataKey::PendingAdmin` is absent) and that the proposal has not expired (reverts with `AdminProposalExpired` / code 85 if `ledger.timestamp() > PendingAdminExpiry`). On success, it updates `InvoiceEscrow::admin` to the successor address, clears the pending keys from storage, and emits `AdminTransferredEvent` (`admin`).
 - Dashboards and runbooks should call `get_pending_admin_remaining_secs()` to display the remaining proposal validity window. The view returns `Some(0)` exactly at expiry while `accept_admin` still accepts, and also after expiry when `accept_admin` rejects.
+- **Nonce-bound recovery:** `recover_admin(reason, expected_nonce)` is serialized with the other
+  current-admin mutations. Read `get_admin_nonce()` immediately before signing and pass that
+  value. A stale or replayed recovery fails with `AdminNonceMismatch` and cannot clear a newer
+  proposal. This changes the recovery call shape from the pre-nonce `recover_admin(reason)` API;
+  upgraded clients must include the nonce, while callers targeting an older deployed WASM must
+  continue using its original interface until that instance is upgraded.
 - Test both steps on Testnet before executing on Mainnet (see `test_admin_handover_lifecycle` and `test_post_handover_admin_can_clear_hold_set_by_old_admin` in `escrow/src/tests/admin.rs` for implementation reference).
 
 #### Cancelling a pending admin proposal

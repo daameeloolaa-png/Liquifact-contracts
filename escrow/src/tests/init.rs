@@ -154,12 +154,164 @@ fn test_init_unauthorized_panics() {
 }
 
 #[test]
-#[should_panic]
-fn test_double_init_panics() {
+fn test_reinit_same_parameters_rejected() {
+    use soroban_sdk::testutils::Events as _;
+
     let env = Env::default();
     let (client, admin, sme) = setup(&env);
     default_init(&client, &env, &admin, &sme);
+    let escrow = client.get_escrow();
+    let token = client.get_funding_token();
+    let treasury = client.get_treasury();
+    let events_before = env.events().all();
+    assert_contract_error(
+        client.try_init(
+            &admin,
+            &soroban_sdk::String::from_str(&env, "INV001"),
+            &sme,
+            &TARGET,
+            &800i64,
+            &1000u64,
+            &token,
+            &None,
+            &treasury,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None::<i64>,
+        ),
+        EscrowError::EscrowAlreadyInitialized,
+    );
+    assert_eq!(client.get_escrow(), escrow);
+    assert_eq!(env.events().all(), events_before);
+}
+
+#[test]
+fn test_reinit_different_admin_rejected() {
+    use soroban_sdk::testutils::Events as _;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
     default_init(&client, &env, &admin, &sme);
+    let escrow = client.get_escrow();
+    let other_admin = Address::generate(&env);
+    let token = client.get_funding_token();
+    let treasury = client.get_treasury();
+    let events_before = env.events().all();
+    assert_contract_error(
+        client.try_init(
+            &other_admin,
+            &soroban_sdk::String::from_str(&env, "INV001"),
+            &sme,
+            &TARGET,
+            &800i64,
+            &1000u64,
+            &token,
+            &None,
+            &treasury,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None::<i64>,
+        ),
+        EscrowError::EscrowAlreadyInitialized,
+    );
+    assert_eq!(client.get_escrow(), escrow);
+    assert_eq!(env.events().all(), events_before);
+}
+
+#[test]
+fn test_reinit_different_token_rejected() {
+    use soroban_sdk::testutils::Events as _;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    let escrow = client.get_escrow();
+    let token_before = client.get_funding_token();
+    let treasury = client.get_treasury();
+    let other_token = Address::generate(&env);
+    let events_before = env.events().all();
+    assert_contract_error(
+        client.try_init(
+            &admin,
+            &soroban_sdk::String::from_str(&env, "INV002"),
+            &sme,
+            &TARGET,
+            &800i64,
+            &1000u64,
+            &other_token,
+            &None,
+            &treasury,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None::<i64>,
+        ),
+        EscrowError::EscrowAlreadyInitialized,
+    );
+    assert_eq!(client.get_escrow(), escrow);
+    assert_eq!(client.get_funding_token(), token_before);
+    assert_eq!(env.events().all(), events_before);
+}
+
+#[test]
+fn test_reinit_during_another_call_rejected() {
+    use soroban_sdk::testutils::Events as _;
+
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    // Touch a distinct config field (maturity-max-horizon) so the escrow is in
+    // a non-fresh, initialized state; directly setting maturity to its current
+    // value (0) would trip `MaturityUnchanged`.
+    client.update_maturity_max_horizon(&100u64, &0u32);
+    let escrow = client.get_escrow();
+    let token = client.get_funding_token();
+    let treasury = client.get_treasury();
+    let events_before = env.events().all();
+    assert_contract_error(
+        client.try_init(
+            &admin,
+            &soroban_sdk::String::from_str(&env, "INV001"),
+            &sme,
+            &TARGET,
+            &800i64,
+            &1000u64,
+            &token,
+            &None,
+            &treasury,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None::<i64>,
+        ),
+        EscrowError::EscrowAlreadyInitialized,
+    );
+    assert_eq!(client.get_escrow(), escrow);
+    assert_eq!(env.events().all(), events_before);
 }
 
 #[test]
@@ -301,7 +453,7 @@ fn test_init_amount_exceeds_max_rejected() {
 /// All intermediate `checked_*` operations must stay within `i128`.
 #[test]
 fn test_max_bound_funded_escrow_compute_investor_payout_no_overflow() {
-    use soroban_sdk::token::StellarAssetClient;
+    use soroban_sdk::{testutils::Address as _, token::StellarAssetClient};
 
     let env = Env::default();
     env.mock_all_auths();
@@ -1577,7 +1729,7 @@ fn test_update_maturity_beyond_horizon_rejected() {
         &None::<i64>,
     );
     assert_contract_error(
-        client.try_update_maturity(&(1000u64 + DEFAULT_MATURITY_MAX_HORIZON_SECS + 1)),
+        client.try_update_maturity(&(1000u64 + DEFAULT_MATURITY_MAX_HORIZON_SECS + 1), &0u32),
         EscrowError::MaturityExceedsMaxHorizon,
     );
 }
@@ -1609,7 +1761,7 @@ fn test_update_maturity_in_past_rejected() {
         &None::<i64>,
     );
     assert_contract_error(
-        client.try_update_maturity(&1000u64),
+        client.try_update_maturity(&1000u64, &0u32),
         EscrowError::MaturityInPast,
     );
 }

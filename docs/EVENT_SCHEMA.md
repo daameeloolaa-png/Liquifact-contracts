@@ -31,15 +31,28 @@ The `name` field is a `#[topic] Symbol` in every LiquiFact event. It carries the
 short routing symbol passed with `symbol_short!(...)`, such as `funded` or
 `escrow_sd`.
 
+Every event in this contract emits a trailing schema version topic. It is a
+`#[topic] Symbol` named `version` with value `v1`. It is always the final topic
+in the topic list, after all other `#[topic]` fields. Indexers MUST ignore this
+extra topic when reading from a known schema version and SHOULD reject events
+whose version is not `v1` when strict compatibility is required.
+
+The trailing version topic is a **compatibility contract**: it is additive and
+must never be reordered, renamed, or removed. Consumers that pin to `v1` rely on
+the exact topic ordering and data field names documented below. Any future
+schema change MUST introduce a new version value (for example `v2`) rather than
+mutating the `v1` layout in place.
+
 ## Event Catalog
 
-The current contract defines 19 event structs.
+The current contract defines 20 event structs.
 
 | Rust event | `name` symbol | Entrypoint(s) |
 |---|---:|---|
 | `EscrowInitialized` | `escrow_ii` | `init` |
 | `MaxUniqueInvestorsCapLowered` | `inv_cap` | `lower_max_unique_investors` |
 | `EscrowFunded` | `funded` | `fund`, `fund_with_commitment` |
+| `FundingStateChanged` | `fund_st_ch` | `fund`, `fund_with_commitment`, `fund_batch`, `update_funding_target`, `partial_settle` |
 | `EscrowSettled` | `escrow_sd` | `settle` |
 | `MaturityUpdatedEvent` | `maturity` | `update_maturity` |
 | `AdminTransferredEvent` | `admin` | `accept_admin` |
@@ -55,11 +68,24 @@ The current contract defines 19 event structs.
 | `TreasuryDustSwept` | `dust_sw` | `sweep_terminal_dust` |
 | `PrimaryAttestationBound` | `att_bind` | `bind_primary_attestation_hash` |
 | `AttestationDigestAppended` | `att_app` | `append_attestation_digest` |
-| `AttestationDigestRevoked` | `att_rev` | `revoke_attestation_digest` |
+| `AttestationDigestRevoked` | `att_rev` | `revoke_attestation_digest`, `revoke_attestation_digests` |
+| `AttestationDigestUnrevoked` | `att_unrev` | `unrevoke_attestation_digest` |
 | `AllowlistEnabledChanged` | `al_ena` | `set_allowlist_active` |
 | `InvestorAllowlistChanged` | `al_set` | `set_investor_allowlisted`, `set_investors_allowlisted` |
 
+The `name` symbol for each event is part of the compatibility contract. Symbols
+are stable identifiers: they MUST NOT be reused for a different event and MUST
+NOT be changed without a versioned migration plan. Indexers route on
+`topic[1] == name`, so symbol drift is a breaking change.
+
 ## Complete Topic And Data Layout
+
+All topic tables below omit the trailing schema version topic for brevity.
+Every event's complete topic list is the table shown plus a final row of the
+form `| <last_index+1> | version | Symbol | v1 |`. The value of `<last_index+1>`
+is one greater than the largest index shown in the table. The version topic is
+additive: it does not change the order, meaning, or data payload of any
+pre-existing topic or field.
 
 ### `EscrowInitialized`
 
@@ -122,6 +148,37 @@ Data:
 | `funded_amount` | `i128` |
 | `status` | `u32` |
 | `investor_effective_yield_bps` | `i64` |
+
+### `FundingStateChanged`
+
+Emitted exactly once when the escrow transitions from **open** (status 0) to **funded** (status 1).
+
+This event is emitted by `fund`, `fund_with_commitment`, `fund_batch`, `update_funding_target`, 
+or `partial_settle` — whichever call causes the `0 → 1` transition. Indexers should subscribe 
+to this event rather than buffering every `EscrowFunded` event to detect the funding-close edge.
+
+Topics:
+
+| Index | Field | Type | Value |
+|---:|---|---|---|
+| 0 | fixed event topic | `Symbol` | `funding_state_changed` |
+| 1 | `name` | `Symbol` | `fund_st_ch` |
+| 2 | `invoice_id` | `Symbol` | Escrow invoice id |
+
+Data:
+
+| Field | Type | Notes |
+|---|---|---|
+| `from_status` | `u32` | Always `0` (open) |
+| `to_status` | `u32` | Always `1` (funded) |
+| `funded_amount` | `i128` | Total principal at transition |
+| `funding_target` | `i128` | Configured target at transition |
+| `ledger_timestamp` | `u64` | Ledger timestamp of transition |
+| `trigger` | `Symbol` | `fund`, `tgt_lower`, or `part_set` |
+
+**Emission guarantee:** This event is emitted exactly once per escrow instance. The `0 → 1` 
+transition is guarded by the `FundingCloseSnapshot` write and by the `escrow.status == 0` 
+precondition. Once status reaches 1 it never decreases.
 
 ### `EscrowSettled`
 
@@ -424,6 +481,23 @@ Topics:
 
 Data: empty map; this struct has no non-topic fields.
 
+### `AttestationDigestUnrevoked`
+
+Emitted after successful `unrevoke_attestation_digest`. Reverses a prior
+revocation for the given append-log index without altering the original digest
+entry.
+
+Topics:
+
+| Index | Field | Type | Value |
+|---:|---|---|---|
+| 0 | fixed event topic | `Symbol` | `attestation_digest_unrevoked` |
+| 1 | `name` | `Symbol` | `att_unrev` |
+| 2 | `invoice_id` | `Symbol` | Escrow invoice id |
+| 3 | `index` | `u32` | Unrevoked attestation index |
+
+Data: empty map; this struct has no non-topic fields.
+
 ### `AllowlistEnabledChanged`
 
 Emitted after successful `set_allowlist_active`.
@@ -461,6 +535,12 @@ Data:
 | `invoice_id` | `Symbol` | Escrow invoice id |
 | `investor` | `Address` | Updated investor |
 | `allowed` | `u32` | `1` = allowed, `0` = blocked |
+
+`set_investors_allowlisted` emits one `InvestorAllowlistChanged` event per
+investor in input order. The batch is bounded by `MAX_INVESTOR_ALLOWLIST_BATCH`;
+if the input exceeds the bound the call fails before any event is emitted, so
+consumers never observe a partial batch. Duplicate investors within a single
+batch are rejected before emission to keep the event stream deterministic.
 
 ## Nested Types
 
@@ -505,6 +585,13 @@ Status values:
 - Do not treat collateral or attestation events as proof of off-chain custody,
   KYC status, or legal enforceability. They are metadata/audit records emitted
   after the corresponding authenticated write succeeds.
+- Treat the topic list as an ordered tuple. The trailing `version` topic is
+  always last; consumers MUST NOT assume any topic after it. New optional
+  topics, if ever introduced, will be added before `version` and gated by a
+  version bump.
+- Data payloads are maps keyed by field name. Consumers MUST tolerate unknown
+  keys within a known version (forward-compatible reads) but MUST NOT rely on
+  key ordering.
 
 ## Security And State Invariants
 
@@ -516,8 +603,15 @@ Status values:
 - Investor claim and refund events are deduplicated by persistent markers or
   contribution zeroing before emission.
 - Event emission is O(1) for all entrypoints except
-  `set_investors_allowlisted`, which emits O(n) `InvestorAllowlistChanged`
-  events for `n <= MAX_INVESTOR_ALLOWLIST_BATCH`.
+  `set_investors_allowlisted` and `revoke_attestation_digests`, which emit O(n)
+  events for `n <= MAX_INVESTOR_ALLOWLIST_BATCH` and `n <= MAX_ATTESTATION_REVOKE_BATCH`
+  respectively.
+- Event emission is atomic with respect to the entrypoint's storage writes: a
+  failed or reverted call emits no events, so indexers never observe a state
+  transition that did not commit.
+- The `FundingStateChanged` `0 → 1` edge is emitted exactly once per escrow
+  instance; concurrent or retried calls cannot produce duplicate emissions
+  because the transition is guarded by the `FundingCloseSnapshot` write.
 
 ## Changelog
 
@@ -527,3 +621,5 @@ Status values:
 | 2026-05-27 | v0.2 | Added initialization references and investor-cap event notes |
 | 2026-05-31 | v0.3 | Issue #272: replaced drifted reference with complete `#[contractevent]` topic and data layout from `escrow/src/lib.rs` |
 | 2026-06-24 | v0.4 | Added `settled_at_ledger_timestamp` field to `EscrowSettled` event; added `is_settleable` view |
+| 2026-07-27 | v0.5 | Added `AttestationDigestUnrevoked` event for `unrevoke_attestation_digest`; updated `AttestationDigestRevoked` to include `revoke_attestation_digests` |
+| 2026-08-14 | v0.6 | Issue #allowlist_event_payloads: documented compatibility contracts for topic ordering, `name` symbols, version topic, batch emission atomicity, and forward-compatible data reads |

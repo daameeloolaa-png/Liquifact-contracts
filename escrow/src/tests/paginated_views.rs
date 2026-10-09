@@ -1,8 +1,11 @@
-// Tests for the shared paginate_window helper and the three public paginated read views:
-//   get_investors, get_allowlisted_investors, get_revoked_attestation_digests.
+// Tests for the shared paginate_window helper and the public paginated read views:
+//   get_investors, get_allowlisted_investors, get_revoked_attestation_digests,
+//   get_collateral_records, get_pause_records, and get_settlement_records.
 //
 // Each test uses a fresh Env so state cannot leak across cases.
 
+use crate::{PauseReason, PauseScope};
+use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, Env};
 
 // ── paginate_window unit tests ────────────────────────────────────────────────
@@ -21,7 +24,10 @@ fn paginate_window_empty_collection_returns_none() {
 fn paginate_window_start_past_end_returns_none() {
     // start >= len → None
     assert_eq!(crate::LiquifactEscrow::paginate_window(5, 10, 50, 5), None);
-    assert_eq!(crate::LiquifactEscrow::paginate_window(100, 10, 50, 5), None);
+    assert_eq!(
+        crate::LiquifactEscrow::paginate_window(100, 10, 50, 5),
+        None
+    );
 }
 
 #[test]
@@ -87,7 +93,7 @@ fn do_init(
 ) {
     client.init(
         admin,
-        &soroban_sdk::String::from_str(env, "INV-PG-001"),
+        &soroban_sdk::String::from_str(env, "INV_PG_001"),
         sme,
         &100_000_000_000i128,
         &800i64,
@@ -159,7 +165,7 @@ fn get_investors_first_page() {
 
     client.init(
         &admin,
-        &soroban_sdk::String::from_str(&env, "INV-PG-FIRST"),
+        &soroban_sdk::String::from_str(&env, "INV_PG_FIRST"),
         &sme,
         &500_000_000i128,
         &800i64,
@@ -211,7 +217,7 @@ fn get_investors_continuation_page() {
 
     client.init(
         &admin,
-        &soroban_sdk::String::from_str(&env, "INV-PG-CONT"),
+        &soroban_sdk::String::from_str(&env, "INV_PG_CONT"),
         &sme,
         &500_000_000i128,
         &800i64,
@@ -261,7 +267,7 @@ fn get_investors_start_past_end_returns_empty() {
 
     client.init(
         &admin,
-        &soroban_sdk::String::from_str(&env, "INV-PG-PAST"),
+        &soroban_sdk::String::from_str(&env, "INV_PG_PAST"),
         &sme,
         &200_000_000i128,
         &800i64,
@@ -291,15 +297,13 @@ fn get_investors_start_past_end_returns_empty() {
 
 // ── get_allowlisted_investors ─────────────────────────────────────────────────
 
-fn setup_allowlist_escrow(
-    env: &Env,
-) -> (crate::LiquifactEscrowClient<'_>, Address, Address) {
+fn setup_allowlist_escrow(env: &Env) -> (crate::LiquifactEscrowClient<'_>, Address, Address) {
     let client = super::deploy(env);
     let admin = Address::generate(env);
     let sme = Address::generate(env);
     client.init(
         &admin,
-        &soroban_sdk::String::from_str(env, "INV-AL-PG"),
+        &soroban_sdk::String::from_str(env, "INV_AL_PG"),
         &sme,
         &100_000_000_000i128,
         &800i64,
@@ -335,7 +339,7 @@ fn get_allowlisted_investors_zero_limit_returns_empty() {
     env.mock_all_auths();
     let (client, admin, _sme) = setup_allowlist_escrow(&env);
     let inv = Address::generate(&env);
-    client.set_investor_allowlisted(&inv, &true);
+    client.set_investor_allowlisted(&inv, &true, &0u32);
     let result = client.get_allowlisted_investors(&0, &0);
     assert_eq!(result.len(), 0);
 }
@@ -346,7 +350,7 @@ fn get_allowlisted_investors_start_past_end_returns_empty() {
     env.mock_all_auths();
     let (client, admin, _sme) = setup_allowlist_escrow(&env);
     let inv = Address::generate(&env);
-    client.set_investor_allowlisted(&inv, &true);
+    client.set_investor_allowlisted(&inv, &true, &0u32);
     // Only 1 investor; start=5 is past the end
     let result = client.get_allowlisted_investors(&5, &10);
     assert_eq!(result.len(), 0);
@@ -359,9 +363,9 @@ fn get_allowlisted_investors_first_page() {
     let (client, _admin, _sme) = setup_allowlist_escrow(&env);
 
     let mut addrs = soroban_sdk::Vec::new(&env);
-    for _ in 0..5 {
+    for i in 0..5u32 {
         let addr = Address::generate(&env);
-        client.set_investor_allowlisted(&addr, &true);
+        client.set_investor_allowlisted(&addr, &true, &i);
         addrs.push_back(addr);
     }
 
@@ -379,9 +383,9 @@ fn get_allowlisted_investors_continuation_page() {
     let (client, _admin, _sme) = setup_allowlist_escrow(&env);
 
     let mut addrs = soroban_sdk::Vec::new(&env);
-    for _ in 0..5 {
+    for i in 0..5u32 {
         let addr = Address::generate(&env);
-        client.set_investor_allowlisted(&addr, &true);
+        client.set_investor_allowlisted(&addr, &true, &i);
         addrs.push_back(addr);
     }
 
@@ -401,12 +405,12 @@ fn get_allowlisted_investors_excludes_revoked_addresses() {
     let addr_a = Address::generate(&env);
     let addr_b = Address::generate(&env);
     let addr_c = Address::generate(&env);
-    client.set_investor_allowlisted(&addr_a, &true);
-    client.set_investor_allowlisted(&addr_b, &true);
-    client.set_investor_allowlisted(&addr_c, &true);
+    client.set_investor_allowlisted(&addr_a, &true, &0u32);
+    client.set_investor_allowlisted(&addr_b, &true, &1u32);
+    client.set_investor_allowlisted(&addr_c, &true, &2u32);
 
     // Revoke addr_b
-    client.set_investor_allowlisted(&addr_b, &false);
+    client.set_investor_allowlisted(&addr_b, &false, &3u32);
 
     // Full page scan should only return addr_a and addr_c
     let result = client.get_allowlisted_investors(&0, &10);
@@ -418,15 +422,13 @@ fn get_allowlisted_investors_excludes_revoked_addresses() {
 
 // ── get_revoked_attestation_digests ───────────────────────────────────────────
 
-fn setup_attestation_escrow(
-    env: &Env,
-) -> (crate::LiquifactEscrowClient<'_>, Address) {
+fn setup_attestation_escrow(env: &Env) -> (crate::LiquifactEscrowClient<'_>, Address) {
     let client = super::deploy(env);
     let admin = Address::generate(env);
     let sme = Address::generate(env);
     client.init(
         &admin,
-        &soroban_sdk::String::from_str(env, "INV-ATT-PG"),
+        &soroban_sdk::String::from_str(env, "INV_ATT_PG"),
         &sme,
         &100_000_000_000i128,
         &800i64,
@@ -469,8 +471,13 @@ fn get_revoked_attestation_digests_zero_limit_returns_empty() {
     let digest = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
     client.append_attestation_digest(&digest);
     client.revoke_attestation_digests(&soroban_sdk::vec![&env, 0u32]);
-    let result = client.get_revoked_attestation_digests(&0, &0);
-    assert_eq!(result.len(), 0);
+    // Zero page limits are rejected with a typed read-boundary error.
+    let expected = crate::EscrowError::AttestationReadLimitZero as u32;
+    match client.try_get_revoked_attestation_digests(&0, &0) {
+        Err(Ok(error)) => assert_eq!(error, soroban_sdk::Error::from_contract_error(expected)),
+        Err(Err(soroban_sdk::InvokeError::Contract(code))) => assert_eq!(code, expected),
+        other => panic!("expected AttestationReadLimitZero, got {other:?}"),
+    }
 }
 
 #[test]
