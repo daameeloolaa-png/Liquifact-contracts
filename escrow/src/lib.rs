@@ -2864,6 +2864,26 @@ impl LiquifactEscrow {
         Self::load_attestation_log(&env)
     }
 
+    /// Read-only configuration snapshot for the attestation subsystem.
+    /// Returns zero counts and `has_primary_hash = false` before initialization.
+    pub fn get_attestation_config(env: Env) -> AttestationConfig {
+        let append_log_len = Self::load_attestation_log(&env).len();
+        let has_primary_hash = env
+            .storage()
+            .instance()
+            .has(&DataKey::PrimaryAttestationHash);
+
+        AttestationConfig {
+            max_append_entries: MAX_ATTESTATION_APPEND_ENTRIES,
+            max_revoke_batch: MAX_ATTESTATION_REVOKE_BATCH,
+            max_read_page: MAX_ATTESTATION_READ_PAGE,
+            append_log_len,
+            append_log_remaining: MAX_ATTESTATION_APPEND_ENTRIES
+                .saturating_sub(append_log_len),
+            has_primary_hash,
+        }
+    }
+
     /// Atomically append multiple digests to the bounded on-chain attestation log in a single
     /// call, saving per-call fees for operators that need to anchor several document hashes at
     /// the same ledger.

@@ -118,6 +118,36 @@ fn test_get_primary_hash_none_before_bind() {
     assert_eq!(client.get_primary_attestation_hash(), None);
 }
 
+#[test]
+fn test_attestation_config_preserves_empty_defaults_before_init() {
+    let env = Env::default();
+    let client = deploy(&env);
+
+    let config = client.get_attestation_config();
+
+    assert_eq!(config.max_append_entries, MAX_ATTESTATION_APPEND_ENTRIES);
+    assert_eq!(config.max_revoke_batch, MAX_ATTESTATION_REVOKE_BATCH);
+    assert_eq!(config.max_read_page, MAX_ATTESTATION_READ_PAGE);
+    assert_eq!(config.append_log_len, 0);
+    assert_eq!(config.append_log_remaining, MAX_ATTESTATION_APPEND_ENTRIES);
+    assert!(!config.has_primary_hash);
+}
+
+#[test]
+fn test_attestation_config_tracks_append_and_primary_hash() {
+    let env = Env::default();
+    let (client, _) = setup_with_init(&env);
+    let primary = digest(&env, 0xA1);
+
+    client.append_attestation_digest(&digest(&env, 0x01));
+    client.bind_primary_attestation_hash(&primary);
+
+    let config = client.get_attestation_config();
+    assert_eq!(config.append_log_len, 1);
+    assert_eq!(config.append_log_remaining, MAX_ATTESTATION_APPEND_ENTRIES - 1);
+    assert!(config.has_primary_hash);
+}
+
 /// A second bind with the **same** digest must panic — single-set is unconditional.
 #[test]
 fn test_bind_primary_hash_same_digest_fails() {
